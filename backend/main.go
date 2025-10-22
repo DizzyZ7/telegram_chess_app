@@ -10,6 +10,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Message представляет собой структуру сообщения, передаваемого по WebSocket.
+type Message struct {
+	Type    string      `json:"type"`
+	Payload interface{} `json:"payload"`
+}
+
 // Hub управляет игровыми комнатами и рассылкой сообщений.
 type Hub struct {
 	games map[string]*Game
@@ -18,15 +24,9 @@ type Hub struct {
 
 // Game представляет собой одну игровую сессию.
 type Game struct {
-	board     string // Пока что простая строка, позже будет использоваться chess.js
-	players   map[*websocket.Conn]bool
+	board     string
+	players   map[*websocket.Conn]string // Используем map с ID игрока
 	playerMu  sync.RWMutex
-}
-
-// Message представляет собой структуру сообщения, передаваемого по WebSocket.
-type Message struct {
-	Type    string      `json:"type"`
-	Payload interface{} `json:"payload"`
 }
 
 var hub = Hub{
@@ -55,10 +55,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Поиск или создание игровой комнаты
 	gameID := r.URL.Query().Get("gameID")
-	if gameID == "" {
-		// TODO: Реализовать логику создания новой игры
+	userID := r.URL.Query().Get("userID")
+
+	if gameID == "" || userID == "" {
+		conn.WriteMessage(websocket.TextMessage, []byte("Ошибка: gameID и userID обязательны"))
 		return
 	}
 
@@ -68,7 +69,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		game = &Game{
-			players: make(map[*websocket.Conn]bool),
+			players: make(map[*websocket.Conn]string),
+			board:   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
 		}
 		hub.mu.Lock()
 		hub.games[gameID] = game
@@ -76,30 +78,68 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	game.playerMu.Lock()
-	game.players[conn] = true
+	game.players[conn] = userID
 	game.playerMu.Unlock()
+	log.Printf("Игрок %s подключился к игре %s", userID, gameID)
+
+	// Оповещаем всех игроков в комнате
+	game.broadcastGameState()
 
 	defer func() {
 		game.playerMu.Lock()
 		delete(game.players, conn)
 		game.playerMu.Unlock()
+		log.Printf("Игрок %s отключился от игры %s", userID, gameID)
+		game.broadcastGameState() // Оповещаем об отключении
 	}()
 
-	// Чтение и обработка сообщений
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
+			log.Printf("Ошибка чтения сообщения от игрока %s: %v", userID, err)
 			break
 		}
 
-		// Рассылка сообщения всем игрокам в комнате
-game.playerMu.RLock()
-for client := range game.players {
-    if err := client.WriteJSON(json.RawMessage(message)); err != nil {
-        log.Printf("Ошибка при отправке сообщения: %v", err)
-    }
-}
-game.playerMu.RUnlock()
+		var msg Message
+		if err := json.Unmarshal(message, &msg); err != nil {
+			log.Printf("Ошибка декодирования JSON: %v", err)
+			continue
+		}
 
+		switch msg.Type {
+		case "make_move":
+			// Логика проверки и выполнения хода
+			// Пока просто рассылаем новый стейт
+			if payload, ok := msg.Payload.(map[string]interface{}); ok {
+				if newBoard, ok := payload["board"].(string); ok {
+					game.board = newBoard
+					game.broadcastGameState()
+				}
+			}
+		}
+	}
+}
+
+func (g *Game) broadcastGameState() {
+	g.playerMu.RLock()
+	defer g.playerMu.RUnlock()
+
+	gameState := Message{
+		Type: "game_state",
+		Payload: map[string]string{
+			"board": g.board,
+		},
+	}
+
+	msgBytes, err := json.Marshal(gameState)
+	if err != nil {
+		log.Printf("Ошибка кодирования JSON для рассылки: %v", err)
+		return
+	}
+
+	for client := range g.players {
+		if err := client.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+			log.Printf("Ошибка при отправке сообщения: %v", err)
+		}
 	}
 }
