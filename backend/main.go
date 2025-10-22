@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/notnil/chess"
 )
 
 // Message представляет собой структуру сообщения, передаваемого по WebSocket.
@@ -24,8 +25,8 @@ type Hub struct {
 
 // Game представляет собой одну игровую сессию.
 type Game struct {
-	board     string
-	players   map[*websocket.Conn]string // Используем map с ID игрока
+	chessGame *chess.Game
+	players   map[*websocket.Conn]string
 	playerMu  sync.RWMutex
 }
 
@@ -69,8 +70,8 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		game = &Game{
-			players: make(map[*websocket.Conn]string),
-			board:   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+			chessGame: chess.NewGame(),
+			players:   make(map[*websocket.Conn]string),
 		}
 		hub.mu.Lock()
 		hub.games[gameID] = game
@@ -82,7 +83,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	game.playerMu.Unlock()
 	log.Printf("Игрок %s подключился к игре %s", userID, gameID)
 
-	// Оповещаем всех игроков в комнате
 	game.broadcastGameState()
 
 	defer func() {
@@ -90,7 +90,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		delete(game.players, conn)
 		game.playerMu.Unlock()
 		log.Printf("Игрок %s отключился от игры %s", userID, gameID)
-		game.broadcastGameState() // Оповещаем об отключении
+		game.broadcastGameState()
 	}()
 
 	for {
@@ -108,12 +108,19 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case "make_move":
-			// Логика проверки и выполнения хода
-			// Пока просто рассылаем новый стейт
 			if payload, ok := msg.Payload.(map[string]interface{}); ok {
-				if newBoard, ok := payload["board"].(string); ok {
-					game.board = newBoard
-					game.broadcastGameState()
+				if moveStr, ok := payload["move"].(string); ok {
+					// Здесь логика проверки хода
+					move, err := chess.UCINotation(moveStr)
+					if err != nil {
+						log.Printf("Неверный формат хода: %v", err)
+						continue
+					}
+
+					if game.chessGame.Position().IsValid(move) {
+						game.chessGame.Move(move)
+						game.broadcastGameState()
+					}
 				}
 			}
 		}
@@ -127,7 +134,7 @@ func (g *Game) broadcastGameState() {
 	gameState := Message{
 		Type: "game_state",
 		Payload: map[string]string{
-			"board": g.board,
+			"fen": g.chessGame.Position().String(),
 		},
 	}
 
