@@ -4,33 +4,44 @@ import { Chessboard } from 'react-chessboard';
 import { Chess } from 'chess.js';
 import './style.css';
 
+interface GameMessage {
+    type: string;
+    payload: {
+        fen: string;
+    };
+}
+
 function App() {
     const [game, setGame] = useState(new Chess());
-    const [gameID, setGameID] = useState<string | null>(null);
     const [ws, setWs] = useState<WebSocket | null>(null);
-    const [boardPosition, setBoardPosition] = useState("start");
-    const [gameStatus, setGameStatus] = useState("Ожидание второго игрока...");
+    const [gameStatus, setGameStatus] = useState("Подключение...");
+    const gameRef = useRef(new Chess());
 
     useEffect(() => {
         WebApp.ready();
-        // В реальном приложении gameID должен передаваться через бота
-        const id = "test_game_id"; 
-        setGameID(id);
+        const urlParams = new URLSearchParams(window.location.search);
+        const gameID = urlParams.get('gameID') || "default_game";
+        const userID = WebApp.initDataUnsafe?.user?.id?.toString() || "guest";
 
-        const websocket = new WebSocket(`ws://localhost:8080/ws?gameID=${id}`);
+        const websocket = new WebSocket(`ws://localhost:8080/ws?gameID=${gameID}&userID=${userID}`);
+
         websocket.onopen = () => {
-            console.log("Connected to WebSocket server");
+            setGameStatus("Ожидание второго игрока...");
         };
+
         websocket.onmessage = (event) => {
-            const message = JSON.parse(event.data);
+            const message: GameMessage = JSON.parse(event.data);
             if (message.type === "game_state") {
-                setBoardPosition(message.payload.board);
-                setGame(new Chess(message.payload.board));
+                gameRef.current.load(message.payload.fen);
+                setGame(new Chess(message.payload.fen));
+                setGameStatus("Игра в процессе...");
             }
         };
+
         websocket.onclose = () => {
-            console.log("Disconnected from WebSocket server");
+            setGameStatus("Соединение потеряно.");
         };
+
         setWs(websocket);
 
         return () => {
@@ -44,29 +55,30 @@ function App() {
         const move = game.move({
             from: sourceSquare,
             to: targetSquare,
-            promotion: 'q', // По умолчанию всегда ферзь, можно сделать диалог
+            promotion: 'q', // По умолчанию всегда ферзь
         });
 
         if (move === null) return false;
 
-        const gameState = {
-            type: "game_state",
+        const moveMessage = {
+            type: "make_move",
             payload: {
-                board: game.fen(),
+                move: move.from + move.to,
             }
         };
-        ws.send(JSON.stringify(gameState));
-        setBoardPosition(game.fen());
+
+        ws.send(JSON.stringify(moveMessage));
+        gameRef.current.move(move);
+        setGame(new Chess(gameRef.current.fen()));
 
         return true;
-    }, [game, ws]);
-
+    }, [ws, game]);
 
     return (
         <div className="App">
             <h1>Telegram Chess Mini App</h1>
             <p>{gameStatus}</p>
-            <Chessboard position={boardPosition} onPieceDrop={onDrop} />
+            <Chessboard position={game.fen()} onPieceDrop={onDrop} />
         </div>
     );
 }
