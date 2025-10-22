@@ -93,12 +93,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Рассылка сообщения всем игрокам в комнате
-		game.playerMu.RLock()
-		for client := range game.players {
-			if err := client.WriteMessage(websocket.TextMessage, message); err != nil {
-				log.Printf("Ошибка при отправке сообщения: %v", err)
-			}
-		}
-		game.playerMu.RUnlock()
+game.playerMu.RLock()
+for client := range game.players {
+    if err := client.WriteJSON(json.RawMessage(message)); err != nil {
+        log.Printf("Ошибка при отправке сообщения: %v", err)
+    }
+}
+game.playerMu.RUnlock()
+
 	}
 }
